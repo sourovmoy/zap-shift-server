@@ -8,6 +8,25 @@ const port = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(cors());
+var admin = require("firebase-admin");
+
+var serviceAccount = require("./zap-shift-71cb9-firebase-adminsdk.json");
+
+admin.initializeApp({
+  credential: admin.credential.cert(serviceAccount),
+});
+
+const verify = (req, res, next) => {
+  const token = req.headers.authorization;
+  if (!token) {
+    return res.status(401).json({
+      message: "Unauthorized access",
+    });
+  }
+  if (token) {
+  }
+  next();
+};
 
 const generateTrackingId = () => {
   const randomString = crypto.randomBytes(6).toString("hex").toUpperCase();
@@ -82,6 +101,7 @@ async function run() {
         });
       }
     });
+
     app.delete("/parcel/:id", async (req, res) => {
       try {
         const id = req.params.id;
@@ -200,10 +220,8 @@ async function run() {
       });
     });
 
-    app.get("/payment-history", async (req, res) => {
+    app.get("/payment-history", verify, async (req, res) => {
       const email = req.query.email;
-      console.log(email);
-
       const query = {};
       if (email) {
         query.customerEmail = email;
