@@ -1,12 +1,18 @@
 const express = require("express");
+const crypto = require("crypto");
 const cors = require("cors");
 const app = express();
 require("dotenv").config();
+const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const port = process.env.PORT || 3000;
 
 app.use(express.json());
 app.use(cors());
 
+const generateTrackingId = () => {
+  const randomString = crypto.randomBytes(6).toString("hex").toUpperCase();
+  return `TRK-${randomString}`;
+};
 app.get("/", (req, res) => {
   res.status(200).json({
     status: 200,
@@ -15,6 +21,7 @@ app.get("/", (req, res) => {
 });
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
+const { log } = require("console");
 const uri = process.env.DATABASE_KEY;
 
 // Create a MongoClient with a MongoClientOptions object to set the Stable API version
@@ -34,6 +41,7 @@ async function run() {
     const database = client.db("zap-shift");
     const userCollection = database.collection("user");
     const parcelCollection = database.collection("parcel");
+    const paymentCollection = database.collection("payment");
 
     app.post("/parcel", async (req, res) => {
       try {
@@ -105,6 +113,107 @@ async function run() {
           error: error.message,
         });
       }
+    });
+
+    // Payment Api
+    app.post("/create-checkout-session", async (req, res) => {
+      const paymentInfo = req.body;
+      const amount = Number(paymentInfo.value) * 100;
+      const session = await stripe.checkout.sessions.create({
+        line_items: [
+          {
+            price_data: {
+              currency: "USD",
+              unit_amount: amount,
+              product_data: {
+                name: paymentInfo.parcelName,
+              },
+            },
+            quantity: 1,
+          },
+        ],
+        customer_email: paymentInfo.senderEmail,
+        mode: "payment",
+        metadata: {
+          parcelId: paymentInfo.parcelId,
+          parcelName: paymentInfo.parcelName,
+        },
+        success_url: `${process.env.DOMAIN_LINK}/dashboard/payment/success?session_id={CHECKOUT_SESSION_ID}`,
+        cancel_url: `${process.env.DOMAIN_LINK}/dashboard/payment/cancelled`,
+      });
+
+      res.send({ url: session.url });
+    });
+
+    app.patch("/session-status", async (req, res) => {
+      const trackingId = generateTrackingId();
+      const sessionId = req.query.session_id;
+      const session = await stripe.checkout.sessions.retrieve(sessionId);
+
+      const transactionId = session.payment_intent;
+      const query = { transactionId: transactionId };
+      const existingPayment = await paymentCollection.findOne(query);
+      if (existingPayment) {
+        return res.send({
+          success: false,
+          message: "Payment already processed",
+          transactionId: transactionId,
+          trackingId: existingPayment.trackingId,
+        });
+      }
+
+      if (session.payment_status === "paid") {
+        const id = session.metadata.parcelId;
+        const query = { _id: new ObjectId(id) };
+        const updateDoc = {
+          $set: { paymentStatus: "paid", trackingId: trackingId },
+        };
+        const result = await parcelCollection.updateOne(query, updateDoc);
+
+        const paymentStatus = {
+          amount: session.amount_total / 100,
+          currency: session.currency,
+          customerEmail: session.customer_email,
+          parcelId: session.metadata.parcelId,
+          parcelName: session.metadata.parcelName,
+          transactionId: session.payment_intent,
+          paymentStatus: session.payment_status,
+          paidAt: new Date(),
+          trackingId: trackingId,
+        };
+        if (session.payment_status === "paid") {
+          const paymentResult = await paymentCollection.insertOne(
+            paymentStatus
+          );
+          res.send({
+            success: true,
+            trackingId: trackingId,
+            transactionId: session.payment_intent,
+            modifyParcel: result,
+            paymentInfo: paymentResult,
+          });
+        }
+      }
+
+      res.send({
+        success: false,
+      });
+    });
+
+    app.get("/payment-history", async (req, res) => {
+      const email = req.query.email;
+      console.log(email);
+
+      const query = {};
+      if (email) {
+        query.customerEmail = email;
+      }
+      const options = { sort: { paidAt: -1 } };
+      const results = await paymentCollection.find(query, options).toArray();
+      res.status(200).json({
+        message: "Payment history",
+        results,
+      });
     });
 
     // Send a ping to confirm a successful connection
